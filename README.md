@@ -1,0 +1,1 @@
+# copilot-auto-approve
