@@ -26,17 +26,26 @@ class FakeTray:
         self.active = False
 
 
+@pytest.fixture(scope="module")
+def root():
+    # Windows の CI では Tk() を何度も作り直すと tk.tcl の読み込みに失敗することがあるため 1 つを共有する
+    r = tk.Tk()
+    yield r
+    r.destroy()
+
+
 @pytest.fixture
-def app(monkeypatch):
+def app(root, monkeypatch):
     monkeypatch.setattr(gui.Settings, "save", lambda self, path=None: None)
     monkeypatch.setattr(gui, "TrayIcon", lambda **kw: FakeTray())
-    root = tk.Tk()
     a = gui.App(root, gui.Settings(hotkey_enabled=False, tray_enabled=True, close_to_tray=True))
     yield a
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
+    # 次のテスト用に root を空に戻す
+    for after_id in root.tk.splitlist(root.tk.call("after", "info")):
+        root.after_cancel(after_id)
+    for child in root.winfo_children():
+        child.destroy()
+    root.deiconify()
 
 
 def test_close_to_tray_and_restore(app):
