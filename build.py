@@ -42,6 +42,7 @@ def main() -> None:
         # OS ごとのバックエンドを動的 import しているため明示的に同梱する
         "--collect-submodules", "pynput",
         "--collect-submodules", "pystray",
+        "--collect-data", "sv_ttk",  # テーマの tcl / 画像ファイル
         *[arg for mod in HIDDEN_IMPORTS for arg in ("--hidden-import", mod)],
         "--distpath", str(DIST),
         "--workpath", str(ROOT / "build"),
