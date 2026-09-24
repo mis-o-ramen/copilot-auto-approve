@@ -13,9 +13,37 @@ pip install -r requirements.txt
 
 - **macOS**: 「システム設定 → プライバシーとセキュリティ」で、ターミナル (または使う IDE) に
   **画面収録** と **アクセシビリティ** の権限を与えてください。
-- **Linux**: X11 環境が必要です (Wayland 非対応)。pyautogui の依存上 `sudo apt install python3-tk` も必要です。
+- **Linux**: X11 環境が必要です (Wayland 非対応)。`sudo apt install python3-tk` も必要です。
+- GUI は Python 標準の tkinter を使います。macOS の Homebrew 版 Python では `brew install python-tk` が必要な場合があります。
 
-## 使い方
+## GUI アプリ
+
+```bash
+python auto_approve_gui.py
+```
+
+ターミナルを使わずに起動したい場合は、ランチャーをダブルクリックしてください
+(`.venv` があれば自動的にそちらの Python を使います)。
+
+- **Windows**: `AutoApprove.pyw`
+- **macOS**: `AutoApprove.command` (初回は右クリック →「開く」)
+
+| 機能 | 説明 |
+| --- | --- |
+| ON / OFF | 右上のボタン、ウィンドウ上でスペースキー、またはグローバルホットキー (既定 `Ctrl+Alt+A`) |
+| ステータス | ● 緑=監視中 / 青=検知のみ / 灰=停止中 / 赤=エラー。クリック数・最終クリック時刻・稼働時間を表示 |
+| 最前面 | チェックで常に最前面に表示 |
+| 検知のみ | クリックせずに検知だけ行う (動作確認用) |
+| 自動OFF | 指定時間 (15分〜2時間) 経過で自動停止。付けっぱなし防止 |
+| 詳細 ▼ | しきい値・チェック間隔・ホットキー・クリック音・起動時自動ON の設定とログ表示 |
+
+- 設定は `settings.json` に保存され、次回起動時に復元されます
+- ボタン画像は ON にするたびに `images/` から読み直すので、画像を追加しても再起動は不要です
+- ホットキーは [pynput](https://pynput.readthedocs.io/) の書式 (`<ctrl>+<shift>+x` など) で指定します。
+  macOS では tkinter との併用で不安定なことがあるため既定で無効です
+  (有効にする場合はアクセシビリティ/入力監視の権限が必要)
+
+## CLI の使い方
 
 1. Allow ボタンをスクリーンショットで切り抜き、`images/allow.png` として保存
 2. まず検知だけ試す:
