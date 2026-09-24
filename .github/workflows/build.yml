@@ -1,0 +1,41 @@
+name: Build app
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "build.py"
+      - "requirements.txt"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller pytest
+      - name: Test
+        run: python -m pytest -q
+      - name: Build
+        run: python build.py
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/AutoApprove -DestinationPath AutoApprove-windows.zip
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        # .app の署名や属性を壊さないよう ditto で固める
+        run: ditto -c -k --keepParent dist/AutoApprove.app AutoApprove-macos.zip && cd dist && zip -r ../AutoApprove-macos.zip images
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoApprove-${{ runner.os }}
+          path: AutoApprove-*.zip

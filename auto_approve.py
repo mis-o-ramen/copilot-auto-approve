@@ -25,9 +25,26 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from user_activity import UserActivity
+
 log = logging.getLogger("auto_approve")
 
-DEFAULT_IMAGE_DIR = Path(__file__).resolve().parent / "images"
+
+
+def app_dir() -> Path:
+    """images/ や settings.json を置くフォルダ。
+
+    PyInstaller でビルドした場合は実行ファイルの隣 (macOS の .app ならその外側)。
+    """
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir.parts[-2:] == ("Contents", "MacOS") and exe_dir.parent.parent.suffix == ".app":
+            return exe_dir.parent.parent.parent
+        return exe_dir
+    return Path(__file__).resolve().parent
+
+
+DEFAULT_IMAGE_DIR = app_dir() / "images"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
 
 
@@ -169,6 +186,8 @@ class WatchConfig:
     region: tuple[int, int, int, int] | None = None
     dry_run: bool = False
     restore_mouse: bool = True
+    # 最後のキーボード/マウス操作からこの秒数が経つまでクリックしない (0 で無効)
+    pause_when_active: float = 0.0
 
 
 HitCallback = Callable[[Match, int, int, bool], None]
@@ -181,10 +200,13 @@ def watch(
     on_hit: HitCallback,
     grabber: ScreenGrabber | None = None,
     clicker: Callable[[int, int, bool], None] = click,
+    on_wait: Callable[[Match], None] | None = None,
+    activity: UserActivity | None = None,
 ) -> None:
     """stop がセットされるまで画面を監視し、見つけたらクリックする。
 
     on_hit(match, x, y, clicked) は検知のたびに呼ばれる (x, y はクリック座標)。
+    ユーザーが操作中でクリックを見送ったときは on_wait(match) が呼ばれる。
     mss はスレッドごとに初期化が必要なため、grabber は呼び出したスレッド内で作る。
     """
     enable_windows_dpi_awareness()
@@ -195,8 +217,18 @@ def watch(
         match = find_best_match(gray, templates, config.threshold, config.scales)
         if match:
             x, y = grabber.to_screen(*match.center, sx, sy)
+            if not config.dry_run and config.pause_when_active > 0 and activity is None:
+                activity = UserActivity()  # GUI から途中で有効化されることもあるので遅延生成
+            if (not config.dry_run and config.pause_when_active > 0
+                    and activity.is_active(config.pause_when_active)):
+                if on_wait:
+                    on_wait(match)
+                stop.wait(min(config.interval, 0.5))  # 操作が止まったらすぐ押せるよう短めに
+                continue
             if not config.dry_run:
                 clicker(x, y, config.restore_mouse)
+                if activity is not None:
+                    activity.mark_self_input()
             on_hit(match, x, y, not config.dry_run)
             if not config.dry_run:
                 # 同じボタンを連打しないよう、ボタンが消えるまで少し待つ
@@ -229,6 +261,7 @@ def run_watch(args: argparse.Namespace, templates: list[Template]) -> int:
         threshold=args.threshold, interval=args.interval, cooldown=args.cooldown,
         scales=args.scales, monitor=args.monitor, region=args.region,
         dry_run=args.dry_run, restore_mouse=not args.no_restore_mouse,
+        pause_when_active=args.pause_when_active,
     )
     log.info("監視開始: テンプレート=%s 閾値=%.2f 間隔=%.1fs%s",
              [t.name for t in templates], config.threshold, config.interval,
@@ -249,7 +282,10 @@ def run_watch(args: argparse.Namespace, templates: list[Template]) -> int:
         if args.once:
             stop.set()
 
-    watch(templates, config, stop, on_hit)
+    def on_wait(match: Match) -> None:
+        log.debug("操作中のためクリックを保留: %s", match.template)
+
+    watch(templates, config, stop, on_hit, on_wait=on_wait)
     return 0
 
 
@@ -293,6 +329,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--once", action="store_true", help="1回クリックしたら終了")
     p.add_argument("--no-restore-mouse", action="store_true",
                    help="クリック後にマウスを元の位置へ戻さない")
+    p.add_argument("--pause-when-active", type=float, default=0.0, metavar="SEC",
+                   help="キーボード/マウス操作から SEC 秒経つまでクリックしない (既定: 0=無効)")
     p.add_argument("--test-image", type=Path,
                    help="画面の代わりに画像ファイルで検知テストして終了")
     p.add_argument("-v", "--verbose", action="store_true", help="詳細ログ")

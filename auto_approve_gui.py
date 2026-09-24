@@ -20,10 +20,11 @@ from pathlib import Path
 from tkinter import ttk
 
 import auto_approve as core
+from tray import TrayIcon
 
 log = logging.getLogger("auto_approve.gui")
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = core.app_dir()
 SETTINGS_PATH = APP_DIR / "settings.json"
 AUTO_OFF_CHOICES = {"なし": 0, "15分": 15, "30分": 30, "1時間": 60, "2時間": 120}
 MAX_LOG_LINES = 200
@@ -32,6 +33,9 @@ COLOR_ON = "#2e9d4f"
 COLOR_OFF = "#8a8a8a"
 COLOR_DRY = "#2f7fd0"
 COLOR_ERROR = "#d0453a"
+COLOR_WAIT = "#d99a1e"
+# 最後の「操作中のため保留」からこの秒数以内なら「操作待ち」と表示する
+WAIT_DISPLAY_SEC = 1.5
 
 
 @dataclass
@@ -45,6 +49,11 @@ class Settings:
     start_on_launch: bool = False
     hotkey_enabled: bool = sys.platform != "darwin"  # macOS は tkinter と併用で不安定なため既定 OFF
     hotkey: str = "<ctrl>+<alt>+a"
+    pause_enabled: bool = True
+    pause_seconds: float = 1.5
+    # pystray は macOS では tkinter のメインループと両立せず、Linux は環境依存のため Windows のみ既定 ON
+    tray_enabled: bool = sys.platform == "win32"
+    close_to_tray: bool = False
     show_details: bool = False
     geometry: str = ""
 
@@ -116,14 +125,19 @@ class App:
         self.started_at = 0.0
         self.auto_off_at = 0.0
         self.error = ""
+        self.last_wait_at = 0.0
 
         self.hotkey = GlobalHotkey(lambda: self.events.put(("hotkey",)))
+        self.tray = TrayIcon(on_toggle=lambda: self.events.put(("hotkey",)),
+                             on_show=lambda: self.events.put(("show",)),
+                             on_quit=lambda: self.events.put(("quit",)))
 
         self._build_ui()
         self._apply_topmost()
         if settings.geometry:
             root.geometry(settings.geometry)
         self._apply_hotkey()
+        self._apply_tray()
         self._render()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self._poll)
@@ -220,8 +234,33 @@ class App:
                         command=self._save).grid(row=4, column=0, columnspan=3, sticky="w", padx=6)
         ttk.Checkbutton(form, text="起動時に自動で ON", variable=self.autostart_var, takefocus=0,
                         command=self._save).grid(row=5, column=0, columnspan=3, sticky="w", padx=6)
+
+        self.pause_var = tk.BooleanVar(value=s.pause_enabled)
+        self.pause_sec_var = tk.StringVar(value=str(s.pause_seconds))
+        pf = ttk.Frame(form)
+        pf.grid(row=6, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Checkbutton(pf, text="操作中はクリックしない (最後の操作から", variable=self.pause_var,
+                        takefocus=0, command=self._on_settings_change).pack(side="left")
+        ps = ttk.Spinbox(pf, from_=0.5, to=10, increment=0.5, width=4,
+                         textvariable=self.pause_sec_var, command=self._on_settings_change)
+        ps.pack(side="left")
+        ps.bind("<FocusOut>", lambda e: self._on_settings_change())
+        ttk.Label(pf, text="秒)").pack(side="left")
+
+        self.tray_var = tk.BooleanVar(value=s.tray_enabled)
+        self.close_to_tray_var = tk.BooleanVar(value=s.close_to_tray)
+        tf = ttk.Frame(form)
+        tf.grid(row=7, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Checkbutton(tf, text="トレイに常駐", variable=self.tray_var, takefocus=0,
+                        command=self._apply_tray).pack(side="left")
+        ttk.Checkbutton(tf, text="× でトレイに格納", variable=self.close_to_tray_var,
+                        takefocus=0, command=self._save).pack(side="left", padx=8)
+        self.tray_status = tk.StringVar()
+        ttk.Label(form, textvariable=self.tray_status, foreground="#666").grid(
+            row=8, column=0, columnspan=3, sticky="w", padx=6)
+
         ttk.Button(form, text="画像フォルダを開く", takefocus=0,
-                   command=self._open_images).grid(row=6, column=0, columnspan=3, sticky="w",
+                   command=self._open_images).grid(row=9, column=0, columnspan=3, sticky="w",
                                                    padx=6, pady=4)
 
         logf = ttk.LabelFrame(self.details, text="ログ")
@@ -259,12 +298,16 @@ class App:
     # ---------- 状態表示 ----------
     def _render(self) -> None:
         dry = self.dry_var.get()
+        waiting = self.running and time.monotonic() - self.last_wait_at < WAIT_DISPLAY_SEC
         if self.error and not self.running:
-            color, text = COLOR_ERROR, "エラー"
+            color, text, tray_text = COLOR_ERROR, "エラー", "Error"
+        elif waiting:
+            color, text, tray_text = COLOR_WAIT, "操作待ち", "Waiting (user active)"
         elif self.running:
-            color, text = (COLOR_DRY, "検知のみ") if dry else (COLOR_ON, "監視中")
+            color, text, tray_text = ((COLOR_DRY, "検知のみ", "Detect only") if dry
+                                      else (COLOR_ON, "監視中", "ON"))
         else:
-            color, text = COLOR_OFF, "停止中"
+            color, text, tray_text = COLOR_OFF, "停止中", "OFF"
         self.dot.itemconfig(self.dot_id, fill=color)
         self.status_var.set(text)
         self.toggle_btn.config(text="ON" if self.running else "OFF",
@@ -272,11 +315,14 @@ class App:
         self.root.title(f"{'[ON] ' if self.running else ''}Auto Approve")
         self.clicks_var.set(f"クリック数: {self.clicks}" + ("  (検知のみモード)" if dry else ""))
         self.threshold_label.set(f"{self.threshold_var.get():.2f}")
+        self.tray.update(color, f"Auto Approve: {tray_text}", self.running)
 
         if self.error and not self.running:
             self.sub_var.set(self.error)
         elif self.running:
             parts = [f"稼働 {fmt_duration(time.monotonic() - self.started_at)}"]
+            if waiting:
+                parts.insert(0, "操作中のためクリック保留")
             if self.auto_off_at:
                 parts.append(f"自動OFFまで {fmt_duration(self.auto_off_at - time.monotonic())}")
             self.sub_var.set(" / ".join(parts))
@@ -341,8 +387,11 @@ class App:
         def on_hit(match: core.Match, x: int, y: int, clicked: bool) -> None:
             self.events.put(("hit", gen, match, x, y, clicked))
 
+        def on_wait(match: core.Match) -> None:
+            self.events.put(("wait", gen, match))
+
         try:
-            core.watch(templates, config, stop, on_hit)
+            core.watch(templates, config, stop, on_hit, on_wait=on_wait)
         except Exception as e:
             if core.is_failsafe(e):
                 self.events.put(("failsafe", gen))
@@ -357,15 +406,23 @@ class App:
                 self._handle(self.events.get_nowait())
         except queue.Empty:
             pass
+        finally:
+            # 途中で例外が出てもポーリングは止めない
+            self.root.after(200, self._poll)
         if self.running and self.auto_off_at and time.monotonic() >= self.auto_off_at:
             self.stop("自動OFF タイマー")
         self._render()
-        self.root.after(200, self._poll)
 
     def _handle(self, ev: tuple) -> None:
         kind = ev[0]
         if kind == "hotkey":
             self.toggle()
+            return
+        if kind == "show":
+            self._show_window()
+            return
+        if kind == "quit":
+            self.quit()
             return
         if ev[1] != self.generation or not self.running:
             return  # 既に停止したワーカーからのイベント
@@ -379,6 +436,10 @@ class App:
                     self.root.bell()
             self._log(f"{'クリック' if clicked else '検知'}: {match.template} "
                       f"score={match.score:.3f} ({x}, {y})")
+        elif kind == "wait":
+            if time.monotonic() - self.last_wait_at >= WAIT_DISPLAY_SEC:
+                self._log(f"操作中のためクリック保留: {ev[2].template}")
+            self.last_wait_at = time.monotonic()
         elif kind == "failsafe":
             self.stop("FAILSAFE (マウスが画面左上隅)")
         elif kind == "error":
@@ -388,7 +449,8 @@ class App:
     # ---------- 設定 ----------
     def _make_config(self) -> core.WatchConfig:
         return core.WatchConfig(threshold=round(self.threshold_var.get(), 2),
-                                interval=self._interval(), dry_run=self.dry_var.get())
+                                interval=self._interval(), dry_run=self.dry_var.get(),
+                                pause_when_active=self._pause_when_active())
 
     def _interval(self) -> float:
         try:
@@ -396,12 +458,22 @@ class App:
         except ValueError:
             return self.settings.interval
 
+    def _pause_seconds(self) -> float:
+        try:
+            return min(10.0, max(0.5, float(self.pause_sec_var.get())))
+        except ValueError:
+            return self.settings.pause_seconds
+
+    def _pause_when_active(self) -> float:
+        return self._pause_seconds() if self.pause_var.get() else 0.0
+
     def _on_settings_change(self) -> None:
         # 実行中の監視にも即時反映 (watch はループごとに config を読み直す)
         if self.config is not None:
             self.config.threshold = round(self.threshold_var.get(), 2)
             self.config.interval = self._interval()
             self.config.dry_run = self.dry_var.get()
+            self.config.pause_when_active = self._pause_when_active()
         self._render()
         self._save()
 
@@ -424,11 +496,29 @@ class App:
     def _apply_hotkey(self) -> None:
         if self.hotkey_enabled_var.get():
             err = self.hotkey.start(self.hotkey_var.get().strip())
+            if err:
+                log.warning("%s", err)
             self.hotkey_status.set(err or f"{self.hotkey_var.get()} で ON/OFF")
         else:
             self.hotkey.stop()
             self.hotkey_status.set("ホットキー無効")
         self._save()
+
+    def _apply_tray(self) -> None:
+        if self.tray_var.get():
+            err = self.tray.start(COLOR_OFF, "Auto Approve")
+            self.tray_status.set(err or "")
+            if err:
+                self.tray_var.set(False)
+        else:
+            self.tray.stop()
+            self.tray_status.set("")
+        self._save()
+
+    def _show_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self._apply_topmost()
 
     def _open_images(self) -> None:
         path = core.DEFAULT_IMAGE_DIR
@@ -451,10 +541,21 @@ class App:
         s.start_on_launch = self.autostart_var.get()
         s.hotkey_enabled = self.hotkey_enabled_var.get()
         s.hotkey = self.hotkey_var.get().strip()
+        s.pause_enabled = self.pause_var.get()
+        s.pause_seconds = self._pause_seconds()
+        s.tray_enabled = self.tray_var.get()
+        s.close_to_tray = self.close_to_tray_var.get()
         s.show_details = self.show_details
         s.save()
 
     def on_close(self) -> None:
+        if self.tray.active and self.close_to_tray_var.get():
+            self.root.withdraw()  # 監視は続ける。トレイの「ウィンドウを表示」で戻す
+            return
+        self.quit()
+
+    def quit(self) -> None:
+        self.tray.stop()
         if self.stop_event:
             self.stop_event.set()
         self.hotkey.stop()
