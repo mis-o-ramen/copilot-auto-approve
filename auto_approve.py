@@ -16,9 +16,11 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -149,10 +151,63 @@ def enable_windows_dpi_awareness() -> None:
 def click(x: int, y: int, restore_mouse: bool) -> None:
     import pyautogui
 
+    pyautogui.FAILSAFE = True  # マウスを左上隅に動かすと FailSafeException で停止
+    pyautogui.PAUSE = 0.05
     original = pyautogui.position()
     pyautogui.click(x, y)
     if restore_mouse:
         pyautogui.moveTo(original.x, original.y)
+
+
+@dataclass
+class WatchConfig:
+    threshold: float = 0.85
+    interval: float = 1.0
+    cooldown: float = 1.5
+    scales: list[float] = field(default_factory=lambda: [1.0])
+    monitor: int = 0
+    region: tuple[int, int, int, int] | None = None
+    dry_run: bool = False
+    restore_mouse: bool = True
+
+
+HitCallback = Callable[[Match, int, int, bool], None]
+
+
+def watch(
+    templates: list[Template],
+    config: WatchConfig,
+    stop: threading.Event,
+    on_hit: HitCallback,
+    grabber: ScreenGrabber | None = None,
+    clicker: Callable[[int, int, bool], None] = click,
+) -> None:
+    """stop がセットされるまで画面を監視し、見つけたらクリックする。
+
+    on_hit(match, x, y, clicked) は検知のたびに呼ばれる (x, y はクリック座標)。
+    mss はスレッドごとに初期化が必要なため、grabber は呼び出したスレッド内で作る。
+    """
+    enable_windows_dpi_awareness()
+    grabber = grabber or ScreenGrabber(config.monitor, config.region)
+    while not stop.is_set():
+        started = time.monotonic()
+        gray, sx, sy = grabber.grab()
+        match = find_best_match(gray, templates, config.threshold, config.scales)
+        if match:
+            x, y = grabber.to_screen(*match.center, sx, sy)
+            if not config.dry_run:
+                clicker(x, y, config.restore_mouse)
+            on_hit(match, x, y, not config.dry_run)
+            if not config.dry_run:
+                # 同じボタンを連打しないよう、ボタンが消えるまで少し待つ
+                stop.wait(config.cooldown)
+                continue
+        stop.wait(max(0.0, config.interval - (time.monotonic() - started)))
+
+
+def is_failsafe(e: BaseException) -> bool:
+    """pyautogui.FailSafeException か (pyautogui を import せずに判定)。"""
+    return type(e).__name__ == "FailSafeException"
 
 
 def run_test_image(args: argparse.Namespace, templates: list[Template]) -> int:
@@ -170,42 +225,32 @@ def run_test_image(args: argparse.Namespace, templates: list[Template]) -> int:
 
 
 def run_watch(args: argparse.Namespace, templates: list[Template]) -> int:
-    enable_windows_dpi_awareness()
-    if not args.dry_run:
-        import pyautogui
-
-        pyautogui.FAILSAFE = True  # マウスを左上隅に動かすと例外で停止
-        pyautogui.PAUSE = 0.05
-
-    grabber = ScreenGrabber(args.monitor, args.region)
+    config = WatchConfig(
+        threshold=args.threshold, interval=args.interval, cooldown=args.cooldown,
+        scales=args.scales, monitor=args.monitor, region=args.region,
+        dry_run=args.dry_run, restore_mouse=not args.no_restore_mouse,
+    )
     log.info("監視開始: テンプレート=%s 閾値=%.2f 間隔=%.1fs%s",
-             [t.name for t in templates], args.threshold, args.interval,
-             " (dry-run)" if args.dry_run else "")
+             [t.name for t in templates], config.threshold, config.interval,
+             " (dry-run)" if config.dry_run else "")
 
+    stop = threading.Event()
     clicks = 0
-    while True:
-        started = time.monotonic()
-        gray, sx, sy = grabber.grab()
-        match = find_best_match(gray, templates, args.threshold, args.scales)
-        if match:
-            x, y = grabber.to_screen(*match.center, sx, sy)
-            if args.dry_run:
-                log.info("検知: %s score=%.3f -> (%d, %d) [クリックせず]",
-                         match.template, match.score, x, y)
-                if args.once:
-                    return 0
-            else:
-                click(x, y, restore_mouse=not args.no_restore_mouse)
-                clicks += 1
-                log.info("クリック #%d: %s score=%.3f -> (%d, %d)",
-                         clicks, match.template, match.score, x, y)
-                if args.once:
-                    return 0
-                # 同じボタンを連打しないよう、ボタンが消えるまで少し待つ
-                time.sleep(args.cooldown)
-                continue
-        elapsed = time.monotonic() - started
-        time.sleep(max(0.0, args.interval - elapsed))
+
+    def on_hit(match: Match, x: int, y: int, clicked: bool) -> None:
+        nonlocal clicks
+        if clicked:
+            clicks += 1
+            log.info("クリック #%d: %s score=%.3f -> (%d, %d)",
+                     clicks, match.template, match.score, x, y)
+        else:
+            log.info("検知: %s score=%.3f -> (%d, %d) [クリックせず]",
+                     match.template, match.score, x, y)
+        if args.once:
+            stop.set()
+
+    watch(templates, config, stop, on_hit)
+    return 0
 
 
 def parse_region(value: str) -> tuple[int, int, int, int]:
@@ -276,8 +321,8 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         log.info("停止しました")
         return 0
-    except Exception as e:  # pyautogui.FailSafeException など
-        if type(e).__name__ == "FailSafeException":
+    except Exception as e:
+        if is_failsafe(e):
             log.info("FAILSAFE: マウスが画面隅に移動したため停止しました")
             return 0
         raise
