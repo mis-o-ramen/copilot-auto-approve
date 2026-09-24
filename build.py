@@ -21,6 +21,16 @@ ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 NAME = "AutoApprove"
 
+# pynput / pystray は実行時に OS 別のバックエンドを import する。collect-submodules は
+# ビルド時に import できたものしか拾わない (例: ディスプレイの無い環境の _xorg) ため明示する
+BACKEND = {"win32": "_win32", "darwin": "_darwin"}.get(sys.platform, "_xorg")
+HIDDEN_IMPORTS = [
+    f"pynput.keyboard.{BACKEND}",
+    f"pynput.mouse.{BACKEND}",
+    f"pynput._util.{BACKEND.lstrip('_')}",
+    f"pystray.{BACKEND}",
+]
+
 
 def main() -> None:
     PyInstaller.__main__.run([
@@ -32,6 +42,7 @@ def main() -> None:
         # OS ごとのバックエンドを動的 import しているため明示的に同梱する
         "--collect-submodules", "pynput",
         "--collect-submodules", "pystray",
+        *[arg for mod in HIDDEN_IMPORTS for arg in ("--hidden-import", mod)],
         "--distpath", str(DIST),
         "--workpath", str(ROOT / "build"),
         "--specpath", str(ROOT / "build"),

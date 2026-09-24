@@ -496,6 +496,8 @@ class App:
     def _apply_hotkey(self) -> None:
         if self.hotkey_enabled_var.get():
             err = self.hotkey.start(self.hotkey_var.get().strip())
+            if err:
+                log.warning("%s", err)
             self.hotkey_status.set(err or f"{self.hotkey_var.get()} で ON/OFF")
         else:
             self.hotkey.stop()
