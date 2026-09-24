@@ -33,6 +33,9 @@ HIDDEN_IMPORTS = [
 
 
 def main() -> None:
+    # Windows でリダイレクト/CI 実行時は cp1252 などになり日本語の print が失敗するため
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     PyInstaller.__main__.run([
         str(ROOT / "auto_approve_gui.py"),
         "--name", NAME,
