@@ -62,3 +62,31 @@ def test_watch_stops_promptly_when_idle():
     stop.set()
     t.join(timeout=1)
     assert not t.is_alive()
+
+
+class FakeActivity:
+    def __init__(self, active_checks):
+        self.active_checks = active_checks  # 最初の N 回は「操作中」
+        self.self_inputs = 0
+
+    def is_active(self, required):
+        self.active_checks -= 1
+        return self.active_checks >= 0
+
+    def mark_self_input(self):
+        self.self_inputs += 1
+
+
+def test_watch_waits_while_user_active():
+    stop = threading.Event()
+    waits, clicks = [], []
+    act = FakeActivity(active_checks=2)
+    cfg = aa.WatchConfig(interval=0.01, cooldown=0.01, pause_when_active=1.0)
+
+    def on_hit(*a):
+        stop.set()
+
+    aa.watch([aa.Template("a", make_button())], cfg, stop, on_hit,
+             FakeGrabber(make_screen(make_button())), lambda x, y, r: clicks.append((x, y)),
+             on_wait=waits.append, activity=act)
+    assert len(waits) == 2 and len(clicks) == 1 and act.self_inputs == 1
