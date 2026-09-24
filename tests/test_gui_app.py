@@ -73,3 +73,24 @@ def test_wait_event_shows_waiting(app):
     app._render()
     assert app.status_var.get() == "操作待ち"
     assert app.tray.updates[-1][0] == "Auto Approve: Waiting (user active)"
+
+
+def test_theme_switch_recolors_labels(app):
+    app.theme_var.set("ダーク")
+    app._on_theme_change()
+    dark = app.theme.palette
+    app.theme_var.set("ライト")
+    app._on_theme_change()
+    light = app.theme.palette
+    assert dark != light
+    fg = {str(w.cget("foreground")) for w, kind in app.theme._labels if kind == "muted"}
+    assert fg == {light.muted}
+
+
+def test_switch_follows_running_state(app):
+    app.running = True
+    app._render()
+    assert app.switch._on
+    app.running = False
+    app._render()
+    assert not app.switch._on

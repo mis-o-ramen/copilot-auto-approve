@@ -5,3 +5,5 @@ pyautogui>=0.9.54
 pynput>=1.7
 pystray>=0.19
 Pillow>=10.0
+sv-ttk>=2.6
+darkdetect>=0.8

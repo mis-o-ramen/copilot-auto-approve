@@ -21,6 +21,7 @@ from tkinter import ttk
 
 import auto_approve as core
 from tray import TrayIcon
+from ui import THEME_CHOICES, Theme, ToggleSwitch
 
 log = logging.getLogger("auto_approve.gui")
 
@@ -29,11 +30,6 @@ SETTINGS_PATH = APP_DIR / "settings.json"
 AUTO_OFF_CHOICES = {"なし": 0, "15分": 15, "30分": 30, "1時間": 60, "2時間": 120}
 MAX_LOG_LINES = 200
 
-COLOR_ON = "#2e9d4f"
-COLOR_OFF = "#8a8a8a"
-COLOR_DRY = "#2f7fd0"
-COLOR_ERROR = "#d0453a"
-COLOR_WAIT = "#d99a1e"
 # 最後の「操作中のため保留」からこの秒数以内なら「操作待ち」と表示する
 WAIT_DISPLAY_SEC = 1.5
 
@@ -54,6 +50,7 @@ class Settings:
     # pystray は macOS では tkinter のメインループと両立せず、Linux は環境依存のため Windows のみ既定 ON
     tray_enabled: bool = sys.platform == "win32"
     close_to_tray: bool = False
+    theme: str = "system"  # system / light / dark
     show_details: bool = False
     geometry: str = ""
 
@@ -150,139 +147,218 @@ class App:
         root = self.root
         root.title("Auto Approve")
         root.resizable(False, False)
-        pad = {"padx": 10, "pady": 4}
+        self.theme = Theme(root)
+        p = self.theme.apply(s.theme)
+        f = self.theme.font
+        sw = self.theme.switch_style
+        px = 16
 
-        top = ttk.Frame(root)
-        top.pack(fill="x", **pad)
-        self.dot = tk.Canvas(top, width=16, height=16, highlightthickness=0)
-        self.dot_id = self.dot.create_oval(2, 2, 14, 14, fill=COLOR_OFF, outline="")
-        self.dot.pack(side="left")
+        # ----- ヘッダー: ステータス + スイッチ -----
+        header = ttk.Frame(root, padding=(px, 14, px, 4))
+        header.pack(fill="x")
+        header.columnconfigure(1, weight=1)
+        self.dot = tk.Canvas(header, width=14, height=14, highlightthickness=0, bd=0)
+        self.dot_id = self.dot.create_oval(1, 1, 13, 13, fill=p.off, outline="")
+        self.dot.grid(row=0, column=0, padx=(0, 8))
         self.status_var = tk.StringVar()
-        ttk.Label(top, textvariable=self.status_var, font=("", 11, "bold")).pack(
-            side="left", padx=(6, 0))
-
-        # macOS では tk.Button の背景色が効かないため Label をボタンとして使う
-        self.toggle_btn = tk.Label(top, width=6, font=("", 14, "bold"), fg="white",
-                                   cursor="hand2", pady=4)
-        self.toggle_btn.pack(side="right")
-        self.toggle_btn.bind("<Button-1>", lambda e: self.toggle())
-
-        info = ttk.Frame(root)
-        info.pack(fill="x", **pad)
-        self.clicks_var = tk.StringVar()
-        self.last_var = tk.StringVar(value="最終クリック: -")
+        ttk.Label(header, textvariable=self.status_var, style="Title.TLabel").grid(
+            row=0, column=1, sticky="w")
+        self.switch = ToggleSwitch(header, command=self.toggle)
+        self.switch.grid(row=0, column=2, rowspan=2, sticky="e")
         self.sub_var = tk.StringVar()
-        ttk.Label(info, textvariable=self.clicks_var).pack(anchor="w")
-        ttk.Label(info, textvariable=self.last_var).pack(anchor="w")
-        ttk.Label(info, textvariable=self.sub_var, foreground="#666").pack(anchor="w")
+        self.theme.label(header, "muted", textvariable=self.sub_var, style="Muted.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
-        opts = ttk.Frame(root)
-        opts.pack(fill="x", **pad)
+        # ----- 統計タイル -----
+        tiles = ttk.Frame(root, padding=(px, 8, px, 4))
+        tiles.pack(fill="x")
+        tiles.columnconfigure((0, 1), weight=1, uniform="tile")
+        self.clicks_var = tk.StringVar(value="0")
+        self.clicks_sub_var = tk.StringVar()
+        self.last_var = tk.StringVar(value="--:--:--")
+        self.last_detail_var = tk.StringVar(value="まだクリックしていません")
+        self._tile(tiles, 0, "クリック", self.clicks_var, self.clicks_sub_var)
+        self._tile(tiles, 1, "最終クリック", self.last_var, self.last_detail_var)
+
+        # ----- クイック設定 -----
+        quick = ttk.Frame(root, padding=(px, 8, px, 4))
+        quick.pack(fill="x")
         self.topmost_var = tk.BooleanVar(value=s.always_on_top)
         self.dry_var = tk.BooleanVar(value=s.dry_run)
-        ttk.Checkbutton(opts, text="最前面", variable=self.topmost_var, takefocus=0,
+        ttk.Checkbutton(quick, text="最前面", variable=self.topmost_var, style=sw, takefocus=0,
                         command=self._on_topmost).pack(side="left")
-        ttk.Checkbutton(opts, text="検知のみ (クリックしない)", variable=self.dry_var,
-                        takefocus=0, command=self._on_settings_change).pack(side="left", padx=8)
+        ttk.Checkbutton(quick, text="検知のみ", variable=self.dry_var, style=sw, takefocus=0,
+                        command=self._on_settings_change).pack(side="left", padx=(16, 0))
 
-        row = ttk.Frame(root)
-        row.pack(fill="x", **pad)
-        ttk.Label(row, text="自動OFF:").pack(side="left")
+        row = ttk.Frame(root, padding=(px, 4, px, 12))
+        row.pack(fill="x")
+        ttk.Label(row, text="自動OFF").pack(side="left")
         self.auto_off_var = tk.StringVar(value=s.auto_off if s.auto_off in AUTO_OFF_CHOICES
                                          else "なし")
         cb = ttk.Combobox(row, textvariable=self.auto_off_var, width=7, state="readonly",
-                          values=list(AUTO_OFF_CHOICES))
-        cb.pack(side="left", padx=4)
+                          values=list(AUTO_OFF_CHOICES), font=f(10))
+        cb.pack(side="left", padx=8)
         cb.bind("<<ComboboxSelected>>", lambda e: self._on_auto_off_change())
-        self.details_btn = ttk.Button(row, width=8, takefocus=0, command=self._toggle_details)
+        self.details_btn = ttk.Button(row, takefocus=0, style="Link.TButton",
+                                      command=self._toggle_details)
         self.details_btn.pack(side="right")
 
-        # ----- 詳細 (設定・ログ) -----
-        self.details = ttk.Frame(root)
-        form = ttk.LabelFrame(self.details, text="設定")
-        form.pack(fill="x", padx=10, pady=4)
+        # ----- 詳細: 設定 / ログ のタブ -----
+        self.details = ttk.Frame(root, padding=(px, 0, px, px))
+        nb = ttk.Notebook(self.details)
+        nb.pack(fill="both", expand=True)
+        form = ttk.Frame(nb, padding=12)
+        logf = ttk.Frame(nb, padding=8)
+        nb.add(form, text="設定")
+        nb.add(logf, text="ログ")
+        form.columnconfigure(1, weight=1)
+        r = 0
 
+        def section(title: str) -> None:
+            nonlocal r
+            self.theme.label(form, "muted", text=title, style="Section.TLabel").grid(
+                row=r, column=0, columnspan=3, sticky="w", pady=(8 if r else 0, 4))
+            r += 1
+
+        def label(text: str) -> None:
+            ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", pady=3)
+
+        section("検知")
         self.threshold_var = tk.DoubleVar(value=s.threshold)
         self.threshold_label = tk.StringVar()
-        ttk.Label(form, text="一致しきい値").grid(row=0, column=0, sticky="w", padx=6, pady=2)
-        ttk.Scale(form, from_=0.5, to=0.99, variable=self.threshold_var, length=140,
-                  command=lambda v: self._on_settings_change()).grid(row=0, column=1, sticky="w")
-        ttk.Label(form, textvariable=self.threshold_label, width=5).grid(row=0, column=2)
+        label("一致しきい値")
+        ttk.Scale(form, from_=0.5, to=0.99, variable=self.threshold_var,
+                  command=lambda v: self._on_settings_change()).grid(row=r, column=1, sticky="ew",
+                                                                     padx=8)
+        ttk.Label(form, textvariable=self.threshold_label, width=4).grid(row=r, column=2)
+        r += 1
 
         self.interval_var = tk.StringVar(value=str(s.interval))
-        ttk.Label(form, text="チェック間隔(秒)").grid(row=1, column=0, sticky="w", padx=6, pady=2)
-        sp = ttk.Spinbox(form, from_=0.2, to=10, increment=0.1, width=6,
+        label("チェック間隔 (秒)")
+        sp = ttk.Spinbox(form, from_=0.2, to=10, increment=0.1, width=6, font=f(10),
                          textvariable=self.interval_var, command=self._on_settings_change)
-        sp.grid(row=1, column=1, sticky="w")
+        sp.grid(row=r, column=1, sticky="w", padx=8)
         sp.bind("<FocusOut>", lambda e: self._on_settings_change())
-
-        self.hotkey_enabled_var = tk.BooleanVar(value=s.hotkey_enabled)
-        self.hotkey_var = tk.StringVar(value=s.hotkey)
-        ttk.Checkbutton(form, text="ホットキー", variable=self.hotkey_enabled_var, takefocus=0,
-                        command=self._apply_hotkey).grid(row=2, column=0, sticky="w", padx=6)
-        he = ttk.Entry(form, textvariable=self.hotkey_var, width=18)
-        he.grid(row=2, column=1, columnspan=2, sticky="w")
-        he.bind("<Return>", lambda e: self._apply_hotkey())
-        he.bind("<FocusOut>", lambda e: self._apply_hotkey())
-        self.hotkey_status = tk.StringVar()
-        ttk.Label(form, textvariable=self.hotkey_status, foreground="#666").grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=6)
-
-        self.beep_var = tk.BooleanVar(value=s.beep)
-        self.autostart_var = tk.BooleanVar(value=s.start_on_launch)
-        ttk.Checkbutton(form, text="クリック時に音を鳴らす", variable=self.beep_var, takefocus=0,
-                        command=self._save).grid(row=4, column=0, columnspan=3, sticky="w", padx=6)
-        ttk.Checkbutton(form, text="起動時に自動で ON", variable=self.autostart_var, takefocus=0,
-                        command=self._save).grid(row=5, column=0, columnspan=3, sticky="w", padx=6)
+        r += 1
 
         self.pause_var = tk.BooleanVar(value=s.pause_enabled)
         self.pause_sec_var = tk.StringVar(value=str(s.pause_seconds))
-        pf = ttk.Frame(form)
-        pf.grid(row=6, column=0, columnspan=3, sticky="w", padx=6)
-        ttk.Checkbutton(pf, text="操作中はクリックしない (最後の操作から", variable=self.pause_var,
-                        takefocus=0, command=self._on_settings_change).pack(side="left")
-        ps = ttk.Spinbox(pf, from_=0.5, to=10, increment=0.5, width=4,
+        ttk.Checkbutton(form, text="操作中はクリックしない", variable=self.pause_var, style=sw,
+                        takefocus=0, command=self._on_settings_change).grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=3)
+        r += 1
+        label("  最後の操作から (秒)")
+        ps = ttk.Spinbox(form, from_=0.5, to=10, increment=0.5, width=6, font=f(10),
                          textvariable=self.pause_sec_var, command=self._on_settings_change)
-        ps.pack(side="left")
+        ps.grid(row=r, column=1, sticky="w", padx=8)
         ps.bind("<FocusOut>", lambda e: self._on_settings_change())
-        ttk.Label(pf, text="秒)").pack(side="left")
+        r += 1
+
+        section("操作")
+        self.hotkey_enabled_var = tk.BooleanVar(value=s.hotkey_enabled)
+        self.hotkey_var = tk.StringVar(value=s.hotkey)
+        ttk.Checkbutton(form, text="ホットキー", variable=self.hotkey_enabled_var, style=sw,
+                        takefocus=0, command=self._apply_hotkey).grid(row=r, column=0, sticky="w",
+                                                                      pady=3)
+        he = ttk.Entry(form, textvariable=self.hotkey_var, width=14, font=f(10))
+        he.grid(row=r, column=1, columnspan=2, sticky="ew", padx=8)
+        he.bind("<Return>", lambda e: self._apply_hotkey())
+        he.bind("<FocusOut>", lambda e: self._apply_hotkey())
+        r += 1
+        self.hotkey_status = tk.StringVar()
+        self.theme.label(form, "muted", textvariable=self.hotkey_status,
+                         style="Muted.TLabel").grid(
+            row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+
+        self.beep_var = tk.BooleanVar(value=s.beep)
+        self.autostart_var = tk.BooleanVar(value=s.start_on_launch)
+        for text, var in (("クリック時に音を鳴らす", self.beep_var),
+                          ("起動時に自動で ON", self.autostart_var)):
+            ttk.Checkbutton(form, text=text, variable=var, style=sw, takefocus=0,
+                            command=self._save).grid(row=r, column=0, columnspan=3, sticky="w",
+                                                     pady=3)
+            r += 1
+
+        section("表示")
+        self.theme_var = tk.StringVar(value=next(
+            (k for k, v in THEME_CHOICES.items() if v == s.theme), "システム"))
+        label("テーマ")
+        tc = ttk.Combobox(form, textvariable=self.theme_var, width=8, state="readonly",
+                          values=list(THEME_CHOICES), font=f(10))
+        tc.grid(row=r, column=1, sticky="w", padx=8)
+        tc.bind("<<ComboboxSelected>>", lambda e: self._on_theme_change())
+        r += 1
 
         self.tray_var = tk.BooleanVar(value=s.tray_enabled)
         self.close_to_tray_var = tk.BooleanVar(value=s.close_to_tray)
-        tf = ttk.Frame(form)
-        tf.grid(row=7, column=0, columnspan=3, sticky="w", padx=6)
-        ttk.Checkbutton(tf, text="トレイに常駐", variable=self.tray_var, takefocus=0,
-                        command=self._apply_tray).pack(side="left")
-        ttk.Checkbutton(tf, text="× でトレイに格納", variable=self.close_to_tray_var,
-                        takefocus=0, command=self._save).pack(side="left", padx=8)
+        ttk.Checkbutton(form, text="トレイに常駐", variable=self.tray_var, style=sw, takefocus=0,
+                        command=self._apply_tray).grid(row=r, column=0, columnspan=3, sticky="w",
+                                                       pady=3)
+        r += 1
+        ttk.Checkbutton(form, text="× でトレイに格納", variable=self.close_to_tray_var, style=sw,
+                        takefocus=0, command=self._save).grid(row=r, column=0, columnspan=3,
+                                                              sticky="w", pady=3)
+        r += 1
         self.tray_status = tk.StringVar()
-        ttk.Label(form, textvariable=self.tray_status, foreground="#666").grid(
-            row=8, column=0, columnspan=3, sticky="w", padx=6)
+        self.theme.label(form, "muted", textvariable=self.tray_status, style="Muted.TLabel",
+                         wraplength=300).grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
 
         ttk.Button(form, text="画像フォルダを開く", takefocus=0,
-                   command=self._open_images).grid(row=9, column=0, columnspan=3, sticky="w",
-                                                   padx=6, pady=4)
+                   command=self._open_images).grid(row=r, column=0, columnspan=3, sticky="w",
+                                                   pady=(10, 0))
 
-        logf = ttk.LabelFrame(self.details, text="ログ")
-        logf.pack(fill="both", padx=10, pady=(4, 10))
-        self.log_box = tk.Listbox(logf, height=8, width=48, activestyle="none")
+        self.log_box = tk.Listbox(logf, height=10, width=40, activestyle="none", bd=0,
+                                  highlightthickness=0, font=f(9))
         self.log_box.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(logf, command=self.log_box.yview)
         sb.pack(side="right", fill="y")
         self.log_box.config(yscrollcommand=sb.set)
 
+        self._apply_palette()
+        # sv-ttk は <<ThemeChanged>> で tk ウィジェットの色を上書きするので、その後にも適用する
+        root.after(100, self._apply_palette)
+        # 詳細の開閉でウィンドウ幅 (= スイッチの位置) が変わらないよう、開いた状態の幅に揃える
+        self.details.pack(fill="both")
+        root.update_idletasks()
+        root.minsize(root.winfo_reqwidth(), 1)
         self.show_details = s.show_details
         self._layout_details()
 
         root.bind("<space>", self._on_space)
 
+    def _tile(self, parent, col: int, caption: str, value: tk.StringVar,
+              sub: tk.StringVar) -> None:
+        tile = ttk.Frame(parent, style="Tile.TFrame", padding=(12, 8))
+        tile.grid(row=0, column=col, sticky="nsew", padx=(0, 6) if col == 0 else (6, 0))
+        t = self.theme
+        t.label(tile, "tile_muted", text=caption, style="TileCaption.TLabel").pack(anchor="w")
+        t.label(tile, "tile", textvariable=value, style="TileValue.TLabel").pack(anchor="w")
+        t.label(tile, "tile_muted", textvariable=sub, style="TileSub.TLabel").pack(anchor="w")
+
+    def _apply_palette(self) -> None:
+        """ttk 以外のウィジェットにテーマ色を反映する。"""
+        p = self.theme.palette
+        self.dot.configure(bg=p.bg)
+        self.switch.configure(bg=p.bg)
+        self.log_box.configure(bg=p.card, fg=p.fg, selectbackground=p.border,
+                               selectforeground=p.fg)
+
+    def _on_theme_change(self) -> None:
+        self.theme.apply(THEME_CHOICES.get(self.theme_var.get(), "system"))
+        self._apply_palette()
+        self.root.after(100, self._apply_palette)
+        self._render()
+        self._save()
+
     def _layout_details(self) -> None:
         if self.show_details:
             self.details.pack(fill="both")
-            self.details_btn.config(text="詳細 ▲")
+            self.details_btn.config(text="設定とログ ▴")
         else:
             self.details.pack_forget()
-            self.details_btn.config(text="詳細 ▼")
+            self.details_btn.config(text="設定とログ ▾")
 
     def _toggle_details(self) -> None:
         self.show_details = not self.show_details
@@ -297,23 +373,25 @@ class App:
 
     # ---------- 状態表示 ----------
     def _render(self) -> None:
+        p = self.theme.palette
         dry = self.dry_var.get()
         waiting = self.running and time.monotonic() - self.last_wait_at < WAIT_DISPLAY_SEC
         if self.error and not self.running:
-            color, text, tray_text = COLOR_ERROR, "エラー", "Error"
+            color, text, tray_text = p.error, "エラー", "Error"
         elif waiting:
-            color, text, tray_text = COLOR_WAIT, "操作待ち", "Waiting (user active)"
+            color, text, tray_text = p.wait, "操作待ち", "Waiting (user active)"
         elif self.running:
-            color, text, tray_text = ((COLOR_DRY, "検知のみ", "Detect only") if dry
-                                      else (COLOR_ON, "監視中", "ON"))
+            color, text, tray_text = ((p.dry, "検知のみ", "Detect only") if dry
+                                      else (p.on, "監視中", "ON"))
         else:
-            color, text, tray_text = COLOR_OFF, "停止中", "OFF"
+            color, text, tray_text = p.off, "停止中", "OFF"
         self.dot.itemconfig(self.dot_id, fill=color)
         self.status_var.set(text)
-        self.toggle_btn.config(text="ON" if self.running else "OFF",
-                               bg=COLOR_ON if self.running else COLOR_OFF)
+        self.switch.set_colors(p.dry if dry else p.on, p.track_off, p.bg)
+        self.switch.set(self.running)
         self.root.title(f"{'[ON] ' if self.running else ''}Auto Approve")
-        self.clicks_var.set(f"クリック数: {self.clicks}" + ("  (検知のみモード)" if dry else ""))
+        self.clicks_var.set(str(self.clicks))
+        self.clicks_sub_var.set("検知のみモード" if dry else "このセッション")
         self.threshold_label.set(f"{self.threshold_var.get():.2f}")
         self.tray.update(color, f"Auto Approve: {tray_text}", self.running)
 
@@ -325,7 +403,7 @@ class App:
                 parts.insert(0, "操作中のためクリック保留")
             if self.auto_off_at:
                 parts.append(f"自動OFFまで {fmt_duration(self.auto_off_at - time.monotonic())}")
-            self.sub_var.set(" / ".join(parts))
+            self.sub_var.set(" · ".join(parts))
         else:
             hint = "ボタン / スペースキー"
             if self.hotkey_enabled_var.get() and self.hotkey.active:
@@ -430,8 +508,8 @@ class App:
             _, _, match, x, y, clicked = ev
             if clicked:
                 self.clicks += 1
-                self.last_var.set(f"最終クリック: {time.strftime('%H:%M:%S')} "
-                                  f"({match.template}, {match.score:.2f})")
+                self.last_var.set(time.strftime("%H:%M:%S"))
+                self.last_detail_var.set(f"{match.template} · {match.score:.2f}")
                 if self.beep_var.get():
                     self.root.bell()
             self._log(f"{'クリック' if clicked else '検知'}: {match.template} "
@@ -506,7 +584,7 @@ class App:
 
     def _apply_tray(self) -> None:
         if self.tray_var.get():
-            err = self.tray.start(COLOR_OFF, "Auto Approve")
+            err = self.tray.start(self.theme.palette.off, "Auto Approve")
             self.tray_status.set(err or "")
             if err:
                 self.tray_var.set(False)
@@ -545,6 +623,7 @@ class App:
         s.pause_seconds = self._pause_seconds()
         s.tray_enabled = self.tray_var.get()
         s.close_to_tray = self.close_to_tray_var.get()
+        s.theme = THEME_CHOICES.get(self.theme_var.get(), "system")
         s.show_details = self.show_details
         s.save()
 
