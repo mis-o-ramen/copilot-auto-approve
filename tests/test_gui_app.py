@@ -42,7 +42,8 @@ def app(root, monkeypatch):
     yield a
     # 次のテスト用に root を空に戻す
     for after_id in root.tk.splitlist(root.tk.call("after", "info")):
-        root.after_cancel(after_id)
+        # after_cancel は Python 側のコマンド登録も消し、後の destroy と衝突するので Tcl を直接呼ぶ
+        root.tk.call("after", "cancel", after_id)
     for child in root.winfo_children():
         child.destroy()
     root.deiconify()
